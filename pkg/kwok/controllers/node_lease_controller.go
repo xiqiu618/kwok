@@ -18,7 +18,10 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"time"
 
 	"github.com/wzshiming/cron"
@@ -332,7 +335,6 @@ func (c *NodeLeaseController) ensureLease(ctx context.Context, leaseName string)
 // renewLease attempts to update the lease for maxUpdateRetries, call this once you're sure the lease has been created
 func (c *NodeLeaseController) renewLease(ctx context.Context, base *coordinationv1.Lease) (*coordinationv1.Lease, bool, error) {
 	lease := base.DeepCopy()
-
 	transitions := format.ElemOrDefault(lease.Spec.HolderIdentity) != c.holderIdentity
 	if transitions {
 		lease.Spec.HolderIdentity = &c.holderIdentity
@@ -348,7 +350,24 @@ func (c *NodeLeaseController) renewLease(ctx context.Context, base *coordination
 		}
 	}
 
-	lease, err := c.typedClient.CoordinationV1().Leases(c.leaseNamespace).Update(ctx, lease, metav1.UpdateOptions{})
+	oldData, err := json.Marshal(coordinationv1.Lease{Spec: base.Spec})
+	if err != nil {
+		return nil, false, err
+	}
+
+	newData, err := json.Marshal(coordinationv1.Lease{Spec: lease.Spec})
+	if err != nil {
+		return nil, false, err
+	}
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, &coordinationv1.Lease{})
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to create merge patch for lease %q/%q: %v", lease.Namespace, lease.Name, err)
+	}
+
+	if "{}" == string(patchBytes) {
+		return nil, false, nil
+	}
+	lease, err = c.typedClient.CoordinationV1().Leases(c.leaseNamespace).Patch(ctx, lease.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
 		return nil, false, err
 	}
